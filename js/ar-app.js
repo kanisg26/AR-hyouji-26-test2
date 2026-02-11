@@ -147,8 +147,16 @@
 
       xrSession.addEventListener('select', onARSelect);
       xrSession.addEventListener('end', () => {
+        console.log('WebXR session ended');
         xrSession = null;
         hitTestSource = null;
+        // ★ XRセッション終了時にフォールバックモードへ自動切替
+        renderer.xr.enabled = false;
+        renderer.setAnimationLoop(null);
+        if (!fallbackMode) {
+          statusText.textContent = 'ARセッション終了 → カメラモードに切替中...';
+          startFallbackMode();
+        }
       });
     } catch (err) {
       console.error('AR session error:', err);
@@ -198,9 +206,14 @@
   }
 
   // =========================================================
-  //  Fallback Mode（WebXR非対応時）
+  //  Fallback Mode（WebXR非対応時 / XRセッション終了後）
   // =========================================================
+  let fallbackAnimateRunning = false;
+  let fallbackControlsReady = false;
+
   async function startFallbackMode() {
+    // 二重起動防止（XRセッション終了時に既にフォールバック中の場合）
+    if (fallbackMode && fallbackAnimateRunning) return;
     fallbackMode = true;
     noARMessage.style.display = 'none';
     arStartOverlay.style.display = 'none';
@@ -213,26 +226,44 @@
 
     addGroundPlane();
 
+    // 既存のレティクルを除去してから再生成
+    if (fallbackReticle) scene.remove(fallbackReticle);
     fallbackReticle = createFallbackReticle();
     scene.add(fallbackReticle);
 
-    setupFallbackControls();
-    tryDeviceOrientation();
-
-    function animate() {
-      requestAnimationFrame(animate);
-      if (useDeviceOrientation) {
-        updateCameraFromOrientation();
-      }
-      if (fallbackReticle && fallbackReticle.visible && !pipePlaced) {
-        updateFallbackReticle();
-      }
-      renderer.render(scene, camera);
+    if (!fallbackControlsReady) {
+      setupFallbackControls();
+      tryDeviceOrientation();
+      fallbackControlsReady = true;
     }
-    animate();
 
-    statusText.textContent = '緑の円を所定位置に合わせてタップ';
-    btnPlace.disabled = false;
+    // レンダリングループ（1回だけ起動）
+    if (!fallbackAnimateRunning) {
+      fallbackAnimateRunning = true;
+      function animate() {
+        requestAnimationFrame(animate);
+        if (useDeviceOrientation) {
+          updateCameraFromOrientation();
+        }
+        if (fallbackReticle && fallbackReticle.visible && !pipePlaced) {
+          updateFallbackReticle();
+        }
+        renderer.render(scene, camera);
+      }
+      animate();
+    }
+
+    // パイプ設置済みの場合はレティクルを非表示にし、UIを適切に表示
+    if (pipePlaced) {
+      fallbackReticle.visible = false;
+      statusText.textContent = '設置完了 - スライダーで回転';
+      pipeInfo.style.display = 'block';
+      rotationControl.style.display = 'block';
+      btnPlace.disabled = true;
+    } else {
+      statusText.textContent = '緑の円を所定位置に合わせてタップ';
+      btnPlace.disabled = false;
+    }
   }
 
   function addGroundPlane() {
@@ -326,6 +357,8 @@
   //  Camera Background
   // =========================================================
   async function startCameraBackground() {
+    // 既にカメラ起動済みの場合はスキップ
+    if (cameraVideo) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
@@ -618,6 +651,21 @@
   }
 
   // =========================================================
+  //  Auto Place（モデル読込時の自動設置）
+  // =========================================================
+  function autoPlaceAtDefaultPosition() {
+    if (pipePlaced) return;
+    let pos;
+    if (fallbackReticle) {
+      pos = fallbackReticle.position.clone();
+    } else {
+      // レティクル未生成の場合はデフォルト位置
+      pos = new THREE.Vector3(0, 0, -3);
+    }
+    placePipe(pos);
+  }
+
+  // =========================================================
   //  Screenshot（スクリーンショット）
   // =========================================================
   function takeScreenshot() {
@@ -839,6 +887,9 @@
       pipeGroup.position.copy(pos);
       pipeGroup.rotation.y = rot;
       scene.add(pipeGroup);
+    } else {
+      // ★ 未設置の場合は自動設置（読込後すぐ表示）
+      autoPlaceAtDefaultPosition();
     }
 
     showStatus(`${filename} 読込完了`);
@@ -864,6 +915,9 @@
       pipeGroup.position.copy(pos);
       pipeGroup.rotation.y = rot;
       scene.add(pipeGroup);
+    } else {
+      // ★ 未設置の場合は自動設置
+      autoPlaceAtDefaultPosition();
     }
 
     showStatus(`${json.project || filename} 読込完了 (${json.pipes.length}本)`);
